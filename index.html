@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en"><body>
+
+
+
+
+
+
+
+<input type="file" id="pick" accept="image/*" multiple hidden>
+<input type="file" id="impFile" accept=".json,application/json" hidden>
+
+<script>
+const DEFAULT=['Winter','Summer','Spring/Autumn','Japanese','Classic','Nautical','Workwear','Blues','Blacks','Earth tones','Formal'];
+const $=id=>document.getElementById(id);
+let db,tags=[],photos=[],filter=new Set(),mode='view',queue=[],view=[],idx=0,manage=false,raf=0;
+const urls=new Map();
+const req=r=>new Promise((ok,ko)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>ko(r.error)});
+const st=(n,m='readonly')=>db.transaction(n,m).objectStore(n);
+const saveTags=()=>st('meta','readwrite').put(tags,'tags');
+const savePhoto=p=>req(st('photos','readwrite').put(p));
+const url=p=>{if(!urls.has(p.id))urls.set(p.id,URL.createObjectURL(p.blob));return urls.get(p.id)};
+const cur=()=>view[idx];
+const panelEl=$('panel');
+
+async function init(){
+  db=await new Promise((ok,ko)=>{const r=indexedDB.open('wardrobe',1);
+    r.onupgradeneeded=()=>{r.result.createObjectStore('photos',{keyPath:'id'});r.result.createObjectStore('meta')};
+    r.onsuccess=()=>ok(r.result);r.onerror=()=>ko(r.error)});
+  photos=await req(st('photos').getAll());
+  tags=(await req(st('meta').get('tags')))||DEFAULT.slice();
+  saveTags();
+  if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
+  render();
+}
+
+function step(){const s=$('track').children;return s.length>1?s[1].offsetLeft-s[0].offsetLeft:$('track').clientWidth}
+
+function render(keep){
+  view=mode==='tag'?queue:photos.filter(p=>[...filter].every(t=>p.tags.includes(t))).sort((a,b)=>b.added-a.added);
+  const t=$('track');t.innerHTML='';
+  view.forEach(()=>{const s=document.createElement('div');s.className='slide';s.appendChild(document.createElement('img'));t.appendChild(s)});
+  if(!keep)idx=0;
+  idx=Math.max(0,Math.min(idx,view.length-1));
+  const none=!view.length;
+  $('empty').style.display=none?'flex':'none';
+  if(none){
+    $('emptyMsg').textContent=photos.length?'No outfit has all of these tags.':'No outfits yet.';
+    $('emptyBtn').textContent=photos.length?'Clear filters':'Add photos';
+  }
+  $('viewAct').style.display=mode==='view'?'flex':'none';
+  $('tagAct').style.display=mode==='tag'?'flex':'none';
+  $('add').style.visibility=$('menu').style.visibility=mode==='view'?'visible':'hidden';
+  requestAnimationFrame(()=>{t.scrollLeft=idx*step();effects();loadNear()});
+  bar();drawPanel();
+}
+
+function bar(){
+  $('filterBtn').textContent=mode==='tag'
+    ?`Tag photo ${idx+1} of ${view.length} ▾`
+    :(filter.size?[...filter].join(' + '):'All outfits')+` (${view.length}) ▾`;
+}
+
+function loadNear(){
+  [...$('track').children].forEach((s,k)=>{const img=s.firstChild;
+    if(Math.abs(k-idx)<=3){if(!img.getAttribute('src'))img.src=url(view[k])}
+    else if(img.getAttribute('src'))img.removeAttribute('src')});
+}
+
+function effects(){
+  const t=$('track'),pos=t.scrollLeft/step();
+  [...t.children].forEach((s,k)=>{const d=Math.min(1,Math.abs(k-pos));
+    s.style.transform=`scale(${1-0.08*d})`;s.style.opacity=1-0.35*d});
+  return Math.round(pos);
+}
+
+$('track').addEventListener('scroll',()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;
+  const n=Math.max(0,Math.min(effects(),view.length-1));
+  if(n!==idx){idx=n;loadNear();bar();if(mode==='tag')drawPanel()}})},{passive:true});
+
+function drawPanel(){
+  panelEl.innerHTML='';
+  const target=mode==='tag'?cur():null;
+  tags.forEach((t,k)=>{
+    const r=document.createElement('label');r.className='row';
+    const c=document.createElement('input');c.type='checkbox';
+    c.checked=mode==='tag'?!!(target&&target.tags.includes(t)):filter.has(t);
+    c.onchange=async()=>{
+      if(mode==='tag'){if(!target)return;
+        target.tags=c.checked?[...target.tags,t]:target.tags.filter(x=>x!==t);await savePhoto(target)}
+      else{c.checked?filter.add(t):filter.delete(t);render()}};
+    const s=document.createElement('span');s.className='sp';s.textContent=t;
+    r.append(c,s);
+    if(manage){
+      const rn=document.createElement('button');rn.className='mini';rn.textContent='Rename';
+      rn.onclick=async e=>{e.preventDefault();let n=prompt('Rename tag',t);if(!n)return;n=n.trim();
+        if(!n||tags.includes(n))return;tags[k]=n;
+        for(const p of photos)if(p.tags.includes(t)){p.tags=p.tags.map(x=>x===t?n:x);await savePhoto(p)}
+        if(filter.delete(t))filter.add(n);saveTags();render(true)};
+      const rm=document.createElement('button');rm.className='mini';rm.textContent='Remove';
+      rm.onclick=async e=>{e.preventDefault();if(!await ask(`Remove the tag "${t}" from all outfits?`))return;
+        tags.splice(k,1);for(const p of photos)if(p.tags.includes(t)){p.tags=p.tags.filter(x=>x!==t);await savePhoto(p)}
+        filter.delete(t);saveTags();render(true)};
+      r.append(rn,rm);
+    }
+    panelEl.appendChild(r);
+  });
+  const f=document.createElement('div');f.className='pfoot';
+  const btn=(txt,fn)=>{const b=document.createElement('button');b.textContent=txt;b.onclick=fn;f.appendChild(b)};
+  if(mode==='view')btn('Clear',()=>{filter.clear();render()});
+  btn('+ New tag',async()=>{let n=prompt('New tag');if(!n)return;n=n.trim();if(!n||tags.includes(n))return;
+    tags.push(n);saveTags();
+    if(mode==='tag'&&cur()){cur().tags.push(n);await savePhoto(cur())}
+    drawPanel()});
+  btn(manage?'Finish':'Manage tags',()=>{manage=!manage;drawPanel()})...
